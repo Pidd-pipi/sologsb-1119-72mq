@@ -20,6 +20,7 @@ import { BeforeAfterSlider } from '../components/common/BeforeAfterSlider';
 import { db } from '../utils/db';
 import { makeSketchDataUrl, PHOTO_STAGE_LABEL, type PrepPhoto } from '../types/photo';
 import { hardnessLabel } from '../utils/unitConvert';
+import { procedureViewState } from '../types/procedure';
 
 /** /compare/:specimenId 前后对照滑块联看 + 导出对照说明文本 */
 export default function CompareView() {
@@ -79,7 +80,9 @@ export default function CompareView() {
       `工序节点：${
         progress.list.length === 0
           ? '无'
-          : progress.list.map((n) => `#${n.seq}${n.stepType}(${n.nodeName}·${n.state === 'done' ? '已完成' : n.state === 'rolledback' ? '已回退' : '待办'})`).join(' → ')
+          : progress.list
+              .map((n) => `#${n.seq}${n.stepType}(${n.nodeName}·${procedureViewState(n).label})`)
+              .join(' → ')
       }`,
     );
     lines.push(`修复前影像：${before ? `${PHOTO_STAGE_LABEL[before.stage]} · ${before.caption}` : '未选'}`);
@@ -216,18 +219,20 @@ export default function CompareView() {
               </Typography>
             ) : (
               <Stack spacing={0.5}>
-                {progress.list.map((n) => (
-                  <Stack key={n.id} direction="row" spacing={1} alignItems="center">
-                    <Typography variant="body2">
-                      #{n.seq} {n.stepType} · {n.nodeName}
-                    </Typography>
-                    <Chip
-                      size="small"
-                      label={n.state === 'done' ? '已完成' : n.state === 'rolledback' ? '已回退' : '待办'}
-                      color={n.state === 'done' ? 'success' : n.state === 'rolledback' ? 'error' : 'default'}
-                    />
-                  </Stack>
-                ))}
+                {progress.list.map((n) => {
+                  const view = procedureViewState(n);
+                  return (
+                    <Stack key={n.id} direction="row" spacing={1} alignItems="center">
+                      <Typography variant="body2">
+                        #{n.seq} {n.stepType} · {n.nodeName}
+                      </Typography>
+                      <Chip size="small" label={view.label} color={view.tone} />
+                      {n.glue?.glueState === 'confirmed' ? (
+                        <Chip size="small" variant="outlined" label={`胶 ${n.glue.lotNo}`} />
+                      ) : null}
+                    </Stack>
+                  );
+                })}
               </Stack>
             )}
             <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 1 }}>

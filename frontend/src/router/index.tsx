@@ -13,30 +13,33 @@ import Chip from '@mui/material/Chip';
 import { useSpecimenStore } from '../stores/specimenStore';
 import { useProcedureStore } from '../stores/procedureStore';
 import { useSupplyStore } from '../stores/supplyStore';
+import { useGlueStore, subscribeGlueChannel } from '../stores/glueStore';
 import { ensureSeedData, markDbVersion, readDbVersion } from '../utils/db';
 import SpecimenList from '../pages/SpecimenList';
 import SpecimenDetail from '../pages/SpecimenDetail';
 import ProcedureForm from '../pages/ProcedureForm';
 import SupplyList from '../pages/SupplyList';
+import GlueBatches from '../pages/GlueBatches';
 import CompareView from '../pages/CompareView';
 
 function Shell() {
   const location = useLocation();
   const navigate = useNavigate();
   const specimens = useSpecimenStore((s) => s.items);
-  const version = readDbVersion();
 
   const navItems = useMemo(() => {
     const firstId = specimens[0]?.id;
     return [
-      { label: '标本台账', path: '/specimens' },
-      { label: '工序录入', path: '/procedures/new' },
-      { label: '材料台账', path: '/supplies' },
-      { label: '前后对照', path: firstId ? `/compare/${firstId}` : '/specimens' },
+      { label: '标本台账', path: '/specimens', match: '/specimens' },
+      { label: '工序录入', path: '/procedures/new', match: '/procedures' },
+      { label: '胶液批次', path: '/glue', match: '/glue' },
+      { label: '材料台账', path: '/supplies', match: '/supplies' },
+      { label: '前后对照', path: firstId ? `/compare/${firstId}` : '/specimens', match: '/compare' },
     ];
   }, [specimens]);
 
-  const active = navItems.findIndex((item) => location.pathname.startsWith(item.path.split('/').slice(0, 2).join('/')));
+  const active = navItems.findIndex((item) => location.pathname.startsWith(item.match));
+  const version = readDbVersion();
 
   return (
     <Box sx={{ minHeight: '100vh', bgcolor: 'grey.50' }}>
@@ -50,6 +53,8 @@ function Shell() {
             onChange={(_, idx) => navigate(navItems[idx].path)}
             textColor="primary"
             indicatorColor="primary"
+            variant="scrollable"
+            scrollButtons="auto"
           >
             {navItems.map((item) => (
               <Tab key={item.label} label={item.label} />
@@ -65,6 +70,7 @@ function Shell() {
           <Route path="/specimens" element={<SpecimenList />} />
           <Route path="/specimens/:id" element={<SpecimenDetail />} />
           <Route path="/procedures/new" element={<ProcedureForm />} />
+          <Route path="/glue" element={<GlueBatches />} />
           <Route path="/supplies" element={<SupplyList />} />
           <Route path="/compare/:specimenId" element={<CompareView />} />
           <Route path="*" element={<Navigate to="/specimens" replace />} />
@@ -80,19 +86,38 @@ export default function AppRouter() {
   const loadSpecimens = useSpecimenStore((s) => s.load);
   const loadProcedures = useProcedureStore((s) => s.load);
   const loadSupplies = useSupplyStore((s) => s.load);
+  const loadGlue = useGlueStore((s) => s.load);
+  const enforceGlue = useGlueStore((s) => s.enforce);
 
   useEffect(() => {
     let alive = true;
     (async () => {
       await ensureSeedData();
       await markDbVersion();
-      await Promise.all([loadSpecimens(), loadProcedures(), loadSupplies()]);
+      await enforceGlue({ silent: true });
+      await Promise.all([loadSpecimens(), loadProcedures(), loadSupplies(), loadGlue()]);
       if (alive) setReady(true);
     })();
+
+    // 全局兜底：30 秒一次失效巡检 + 标签页重新可见时立即巡检
+    const timer = window.setInterval(() => void enforceGlue(), 30000);
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') void enforceGlue();
+    };
+    document.addEventListener('visibilitychange', onVisible);
+
+    // 其它标签页发生领用/配液/失效级联后，本标签页重新拉取四张表
+    const unsubscribe = subscribeGlueChannel(() => {
+      void Promise.all([loadGlue(), loadProcedures(), loadSpecimens(), loadSupplies()]);
+    });
+
     return () => {
       alive = false;
+      window.clearInterval(timer);
+      document.removeEventListener('visibilitychange', onVisible);
+      unsubscribe();
     };
-  }, [loadSpecimens, loadProcedures, loadSupplies]);
+  }, [loadSpecimens, loadProcedures, loadSupplies, loadGlue, enforceGlue]);
 
   if (!ready) {
     return (

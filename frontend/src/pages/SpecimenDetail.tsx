@@ -15,12 +15,17 @@ import AddIcon from '@mui/icons-material/Add';
 import CompareIcon from '@mui/icons-material/Compare';
 import { useSpecimenStore } from '../stores/specimenStore';
 import { useProcedureStore } from '../stores/procedureStore';
+import { useGlueStore } from '../stores/glueStore';
 import { usePrepProgress } from '../hooks/usePrepProgress';
 import { SpecimenCard } from '../components/common/SpecimenCard';
 import { ProcedureTimeline } from '../components/common/ProcedureTimeline';
+import { GlueActionDialog } from '../components/common/GlueActionDialog';
 import { db } from '../utils/db';
 import { PHOTO_STAGE_LABEL, type PrepPhoto } from '../types/photo';
 import { SPECIMEN_STATUSES, type SpecimenStatus } from '../types/specimen';
+import type { PrepProcedure } from '../types/procedure';
+import { reconfirmProcedureGlue, supplementProcedureGlue } from '../utils/glueService';
+import { broadcastGlueChanged } from '../stores/glueStore';
 
 /** /specimens/:id 详情 + 工序时间线 + 影像 */
 export default function SpecimenDetail() {
@@ -30,9 +35,15 @@ export default function SpecimenDetail() {
   const setStatus = useSpecimenStore((s) => s.setStatus);
   const finish = useProcedureStore((s) => s.finish);
   const rollback = useProcedureStore((s) => s.rollback);
+  const glueBatches = useGlueStore((s) => s.items);
+  const loadGlue = useGlueStore((s) => s.load);
+  const loadProcedures = useProcedureStore((s) => s.load);
+  const loadSpecimens = useSpecimenStore((s) => s.load);
   const progress = usePrepProgress(id);
   const [photos, setPhotos] = useState<PrepPhoto[]>([]);
   const [toast, setToast] = useState('');
+  const [statusError, setStatusError] = useState('');
+  const [glueDialog, setGlueDialog] = useState<{ mode: 'reconfirm' | 'supplement'; procedure: PrepProcedure } | null>(null);
 
   const loadPhotos = useCallback(async () => {
     if (!id) return;
@@ -44,6 +55,10 @@ export default function SpecimenDetail() {
   useEffect(() => {
     void loadPhotos();
   }, [loadPhotos]);
+
+  const reloadAll = async () => {
+    await Promise.all([loadGlue(), loadProcedures(), loadSpecimens()]);
+  };
 
   if (!specimen) {
     return (
@@ -58,6 +73,25 @@ export default function SpecimenDetail() {
 
   const beforePhotos = photos.filter((p) => p.stage === 'before');
   const afterPhotos = photos.filter((p) => p.stage === 'after');
+  const hasUnfinished = progress.list.some((it) => it.state !== 'done');
+  const glueBlocked = progress.pendingSupplement + progress.glueInvalid;
+
+  const changeStatus = async (next: SpecimenStatus) => {
+    setStatusError('');
+    if (next === '已交付') {
+      // 交付卡口：待补 / 失效 / 未完成工序存在时一律拒绝，避免过期胶液标本流出
+      if (glueBlocked > 0) {
+        setStatusError(`不能交付：仍有 ${glueBlocked} 个工序的胶液待补或已失效，请重新确认后再交付`);
+        return;
+      }
+      if (hasUnfinished) {
+        setStatusError('不能交付：尚有未完成工序节点');
+        return;
+      }
+    }
+    await setStatus(specimen.id, next);
+    setToast(`状态已更新为「${next}」`);
+  };
 
   return (
     <Stack spacing={2}>
@@ -65,6 +99,7 @@ export default function SpecimenDetail() {
         <Typography variant="h5" fontWeight={700}>
           标本详情 · {specimen.specimenNo}
         </Typography>
+        {specimen.status === '已撤下' ? <Chip size="small" color="error" label="已撤下" /> : null}
         <Box sx={{ flex: 1 }} />
         <Button
           variant="contained"
@@ -82,6 +117,21 @@ export default function SpecimenDetail() {
         </Button>
       </Stack>
 
+      {specimen.status === '已撤下' ? (
+        <Alert severity="error" data-testid="specimen-withdrawn-banner">
+          该标本已从交付状态撤下（{specimen.withdrawnAt ? new Date(specimen.withdrawnAt).toLocaleString('zh-CN') : '时间未记录'}）。
+          {specimen.withdrawReason ? `原因：${specimen.withdrawReason}。` : ''}
+          请对失效工序用新批次重新确认，全部完成后再重新交付。
+        </Alert>
+      ) : null}
+      {progress.glueInvalid > 0 ? (
+        <Alert severity="error">有 {progress.glueInvalid} 个工序所用胶液已过适用期或余量耗尽，须重新确认后方可交付。</Alert>
+      ) : null}
+      {progress.pendingSupplement > 0 ? (
+        <Alert severity="warning">有 {progress.pendingSupplement} 个旧工序缺配液信息（待补），原完成结论未沿用。</Alert>
+      ) : null}
+      {statusError ? <Alert severity="error">{statusError}</Alert> : null}
+
       <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', md: '380px 1fr' }, gap: 2 }}>
         <Stack spacing={1.5}>
           <SpecimenCard item={specimen} />
@@ -94,10 +144,7 @@ export default function SpecimenDetail() {
               size="small"
               fullWidth
               value={specimen.status}
-              onChange={async (e) => {
-                await setStatus(specimen.id, e.target.value as SpecimenStatus);
-                setToast(`状态已更新为「${e.target.value}」`);
-              }}
+              onChange={(e) => void changeStatus(e.target.value as SpecimenStatus)}
             >
               {SPECIMEN_STATUSES.map((s) => (
                 <MenuItem key={s} value={s}>
@@ -105,11 +152,20 @@ export default function SpecimenDetail() {
                 </MenuItem>
               ))}
             </TextField>
+            <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 0.5 }}>
+              存在未完成工序或胶液待补 / 失效节点时，「已交付」会被拦截；胶液失效的已交付标本会自动撤下。
+            </Typography>
           </Paper>
           <Paper variant="outlined" sx={{ p: 1.5 }}>
             <Stack direction="row" alignItems="center" spacing={1} sx={{ mb: 1 }}>
               <Typography variant="subtitle2">工序完成度</Typography>
               <Chip size="small" label={`${progress.done}/${progress.total}`} />
+              {progress.pendingSupplement > 0 ? (
+                <Chip size="small" color="warning" label={`待补 ${progress.pendingSupplement}`} />
+              ) : null}
+              {progress.glueInvalid > 0 ? (
+                <Chip size="small" color="error" label={`胶液失效 ${progress.glueInvalid}`} />
+              ) : null}
               {progress.gaps.length > 0 ? (
                 <Chip size="small" color="error" label={`跳号 ${progress.gaps.join(',')}`} />
               ) : (
@@ -135,13 +191,16 @@ export default function SpecimenDetail() {
             <ProcedureTimeline
               items={progress.list}
               onFinish={async (pid) => {
-                await finish(pid);
-                setToast('节点已完成');
+                const r = await finish(pid);
+                setToast(r.message);
+                if (!r.ok) setStatusError(r.message);
               }}
               onRollback={async (pid) => {
                 await rollback(pid);
                 setToast('节点已回退');
               }}
+              onReconfirmGlue={(p) => setGlueDialog({ mode: 'reconfirm', procedure: p })}
+              onSupplementGlue={(p) => setGlueDialog({ mode: 'supplement', procedure: p })}
             />
           </Paper>
 
@@ -174,6 +233,32 @@ export default function SpecimenDetail() {
           </Paper>
         </Stack>
       </Box>
+
+      <GlueActionDialog
+        mode={glueDialog?.mode ?? 'reconfirm'}
+        procedure={glueDialog?.procedure ?? null}
+        batches={glueBatches}
+        onClose={() => setGlueDialog(null)}
+        onSubmit={async (payload) => {
+          if (!glueDialog?.procedure) return { ok: false, message: '工序不存在' };
+          if (glueDialog.mode === 'reconfirm') {
+            const result = await reconfirmProcedureGlue(glueDialog.procedure.id, {
+              batchId: payload.batchId,
+              qty: payload.qty,
+              operator: payload.operator,
+              specimenNo: specimen.specimenNo,
+            });
+            await reloadAll();
+            if (result.ok) broadcastGlueChanged();
+            return result;
+          }
+          const result = await supplementProcedureGlue(glueDialog.procedure.id, payload);
+          await reloadAll();
+          if (result.ok) broadcastGlueChanged();
+          return result;
+        }}
+        onDone={(msg) => setToast(msg)}
+      />
 
       <Snackbar open={!!toast} autoHideDuration={2400} onClose={() => setToast('')} message={toast} />
     </Stack>

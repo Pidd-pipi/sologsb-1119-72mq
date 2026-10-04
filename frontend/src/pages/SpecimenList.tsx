@@ -22,6 +22,7 @@ import { useSpecimenSearch } from '../hooks/useSpecimenSearch';
 import { SpecimenCard } from '../components/common/SpecimenCard';
 import { MeasureField } from '../components/common/MeasureField';
 import { SPECIMEN_STATUSES, type SpecimenDraft, type SpecimenStatus } from '../types/specimen';
+import { glueStateOf } from '../types/procedure';
 import { hardnessLabel, mmToInch } from '../utils/unitConvert';
 
 const EMPTY_DRAFT: SpecimenDraft = {
@@ -59,8 +60,9 @@ export default function SpecimenList() {
 
   const progressOf = (specimenId: string) => {
     const list = procedures.filter((p) => p.specimenId === specimenId);
-    const done = list.filter((p) => p.state === 'done').length;
-    return { total: list.length, done };
+    const done = list.filter((p) => p.state === 'done' && !['pending_supplement', 'invalid'].includes(glueStateOf(p))).length;
+    const glueBlocked = list.filter((p) => ['pending_supplement', 'invalid'].includes(glueStateOf(p))).length;
+    return { total: list.length, done, glueBlocked };
   };
 
   const submit = async () => {
@@ -165,7 +167,17 @@ export default function SpecimenList() {
         </Stack>
       </Paper>
 
-      <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr', md: 'repeat(5, minmax(0, 1fr))' }, gap: 1.5 }}>
+      <Box
+        sx={{
+          display: 'grid',
+          gridTemplateColumns: {
+            xs: '1fr',
+            md: 'repeat(3, minmax(0, 1fr))',
+            lg: 'repeat(6, minmax(0, 1fr))',
+          },
+          gap: 1.5,
+        }}
+      >
         {columns.map((col) => (
           <Stack key={col.status} spacing={1} sx={{ minWidth: 0 }}>
             <Stack direction="row" alignItems="center" spacing={0.5}>
@@ -182,9 +194,14 @@ export default function SpecimenList() {
                   item={item}
                   onOpen={(id) => navigate(`/specimens/${id}`)}
                   footer={
-                    <Typography variant="caption" color="text.secondary">
-                      工序 {p.done}/{p.total} · {hardnessLabel(item.matrixHardness).label}
-                    </Typography>
+                    <Stack direction="row" spacing={0.5} alignItems="center">
+                      <Typography variant="caption" color="text.secondary">
+                        工序 {p.done}/{p.total} · {hardnessLabel(item.matrixHardness).label}
+                      </Typography>
+                      {p.glueBlocked > 0 ? (
+                        <Chip size="small" color="error" variant="outlined" label={`胶液待处理 ${p.glueBlocked}`} />
+                      ) : null}
+                    </Stack>
                   }
                 />
               );

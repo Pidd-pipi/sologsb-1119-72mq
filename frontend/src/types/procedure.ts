@@ -43,6 +43,37 @@ export const STEP_FIELD_MAP: Record<
 /** 工序节点状态 */
 export type ProcedureState = 'pending' | 'done' | 'rolledback';
 
+/** 工序与胶液批次的绑定状态 */
+export type ProcedureGlueState = 'none' | 'pending_supplement' | 'confirmed' | 'invalid';
+
+/** 失效原因：胶液适用期到 / 余量不足 */
+export type ProcedureGlueInvalidReason = 'potlife' | 'depleted' | 'manual';
+
+/** 胶液绑定快照（配液批号、用量随工序留痕） */
+export interface ProcedureGlueSnapshot {
+  /** 胶液批次 id */
+  batchId: string;
+  /** 批号快照 */
+  lotNo: string;
+  /** 领用量 */
+  issueQty: number;
+  /** 领用（确认）时间 */
+  boundAt: number;
+  /** 绑定责任人（领用人） */
+  boundOperator: string;
+}
+
+/** 工序的胶液绑定信息：待补态只有状态与备注，确认/失效态带批次快照 */
+export type ProcedureGlueBinding = (
+  | ({ glueState: 'pending_supplement' } & Partial<ProcedureGlueSnapshot>)
+  | ({ glueState: 'confirmed' | 'invalid' } & ProcedureGlueSnapshot)
+) & {
+  invalidReason?: ProcedureGlueInvalidReason;
+  invalidatedAt?: number;
+  /** 待补 / 失效备注 */
+  glueNote?: string;
+};
+
 /** 修复工序 */
 export interface PrepProcedure {
   id: string;
@@ -72,6 +103,31 @@ export interface PrepProcedure {
   startedAt: number;
   state: ProcedureState;
   finishedAt?: number;
+  /** 胶液绑定：用胶工序为绑定信息，不用胶工序为 null */
+  glue: ProcedureGlueBinding | null;
 }
 
 export type PrepProcedureDraft = Omit<PrepProcedure, 'id'>;
+
+/** 该工序类型是否需要胶液（候选胶种非空） */
+export function stepNeedsGlue(stepType: StepType): boolean {
+  return STEP_FIELD_MAP[stepType].adhesives.length > 0;
+}
+
+/** 工序的胶液绑定状态（兼容缺字段的旧记录） */
+export function glueStateOf(p: PrepProcedure): ProcedureGlueState {
+  if (!stepNeedsGlue(p.stepType)) return 'none';
+  return p.glue?.glueState ?? 'pending_supplement';
+}
+
+/** 节点在时间线/进度口径下的状态视图 */
+export function procedureViewState(
+  p: PrepProcedure,
+): { label: string; tone: 'success' | 'error' | 'warning' | 'default' } {
+  const gs = glueStateOf(p);
+  if (gs === 'invalid') return { label: '胶液失效', tone: 'error' };
+  if (gs === 'pending_supplement') return { label: '待补配液', tone: 'warning' };
+  if (p.state === 'done') return { label: '已完成', tone: 'success' };
+  if (p.state === 'rolledback') return { label: '已回退', tone: 'error' };
+  return { label: '待办', tone: 'default' };
+}

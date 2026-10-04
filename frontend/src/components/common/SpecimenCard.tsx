@@ -17,12 +17,13 @@ export interface SpecimenCardProps {
   selected?: boolean;
 }
 
-const STATUS_TONE: Record<string, 'default' | 'info' | 'warning' | 'success'> = {
+const STATUS_TONE: Record<string, 'default' | 'info' | 'warning' | 'success' | 'error'> = {
   待清修: 'default',
   修复中: 'info',
   已加固: 'warning',
   待交付: 'warning',
   已交付: 'success',
+  已撤下: 'error',
 };
 
 /**
