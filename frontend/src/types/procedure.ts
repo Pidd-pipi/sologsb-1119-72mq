@@ -40,8 +40,14 @@ export const STEP_FIELD_MAP: Record<
   },
 };
 
-/** 工序节点状态 */
-export type ProcedureState = 'pending' | 'done' | 'rolledback';
+/**
+ * 工序节点状态
+ * pending 待办 / done 已完成 / rolledback 已回退 / invalid 因胶液到期或余量不足被撤销
+ */
+export type ProcedureState = 'pending' | 'done' | 'rolledback' | 'invalid';
+
+/** 时间线上的派生状态：老工序有胶种却缺配液批次时标「待补」，不沿用完成结论 */
+export type DerivedProcState = ProcedureState | 'needInfo';
 
 /** 修复工序 */
 export interface PrepProcedure {
@@ -58,8 +64,17 @@ export interface PrepProcedure {
   abrasive: string;
   /** 胶种 */
   adhesive: string;
+  /** 关联的胶液批次（配液批号冗余存快照，批次被删/查不到时仍可追溯） */
+  glueBatchId?: string;
+  glueLotNo?: string;
+  /** 本节点领用胶液量 ml */
+  glueQty?: number;
   /** 胶液浓度 % */
   adhesiveConc: number;
+  /** 被撤销原因（胶液适用期到 / 余量不足） */
+  invalidReason?: string;
+  /** 失效前状态，重新确认后恢复 */
+  stateBeforeInvalid?: ProcedureState;
   /** 耗时 min */
   durationMin: number;
   /** 环境温度 ℃ */
@@ -75,3 +90,8 @@ export interface PrepProcedure {
 }
 
 export type PrepProcedureDraft = Omit<PrepProcedure, 'id'>;
+
+/** 该工序是否涉及胶液（已选胶种即必须关联配液批次） */
+export function procedureUsesGlue(p: Pick<PrepProcedure, 'adhesive'>): boolean {
+  return !!p.adhesive?.trim();
+}

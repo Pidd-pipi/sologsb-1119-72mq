@@ -60,7 +60,10 @@ export default function SpecimenList() {
   const progressOf = (specimenId: string) => {
     const list = procedures.filter((p) => p.specimenId === specimenId);
     const done = list.filter((p) => p.state === 'done').length;
-    return { total: list.length, done };
+    const invalid = list.filter((p) => p.state === 'invalid').length;
+    // 老工序有胶种但无配液批次：待补，不沿用完成结论
+    const needInfo = list.filter((p) => p.state !== 'invalid' && p.state !== 'rolledback' && !!p.adhesive && !p.glueBatchId).length;
+    return { total: list.length, done, invalid, needInfo };
   };
 
   const submit = async () => {
@@ -182,9 +185,16 @@ export default function SpecimenList() {
                   item={item}
                   onOpen={(id) => navigate(`/specimens/${id}`)}
                   footer={
-                    <Typography variant="caption" color="text.secondary">
-                      工序 {p.done}/{p.total} · {hardnessLabel(item.matrixHardness).label}
-                    </Typography>
+                    <Stack direction="row" spacing={0.5} flexWrap="wrap" useFlexGap>
+                      <Typography variant="caption" color="text.secondary">
+                        工序 {p.done}/{p.total} · {hardnessLabel(item.matrixHardness).label}
+                      </Typography>
+                      {p.invalid > 0 ? (
+                        <Chip size="small" color="error" label={`失效 ${p.invalid}`} data-testid={`card-invalid-${item.specimenNo}`} />
+                      ) : null}
+                      {p.needInfo > 0 ? <Chip size="small" color="warning" label={`待补 ${p.needInfo}`} /> : null}
+                      {item.withdrawReason ? <Chip size="small" color="error" variant="outlined" label="已撤下" /> : null}
+                    </Stack>
                   }
                 />
               );

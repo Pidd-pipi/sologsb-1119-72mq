@@ -64,6 +64,15 @@ export default function CompareView() {
     [progress.list],
   );
 
+  const stateText = (n: (typeof progress.list)[number]) => {
+    const s = progress.stateOf(n);
+    if (s === 'done') return '已完成';
+    if (s === 'rolledback') return '已回退';
+    if (s === 'invalid') return `已失效（${n.invalidReason ?? '胶液失效'}）`;
+    if (s === 'needInfo') return '待补配液';
+    return '待办';
+  };
+
   const statement = useMemo(() => {
     if (!specimen) return '';
     const lines: string[] = [];
@@ -73,13 +82,16 @@ export default function CompareView() {
     lines.push(`层位/产地：${specimen.horizon} / ${specimen.locality}`);
     lines.push(`围岩：${specimen.lithology} · ${hardnessLabel(specimen.matrixHardness).label}`);
     lines.push(`尺寸/重量：${specimen.dimensions} mm / ${specimen.weight} g`);
-    lines.push(`当前状态：${specimen.status}`);
-    lines.push(`工序完成度：${progress.done}/${progress.total}（${progress.percent}%）`);
+    lines.push(`当前状态：${specimen.status}${specimen.withdrawReason ? '（已从交付撤下，待重新确认）' : ''}`);
+    lines.push(`工序有效完成度：${progress.effectiveDone}/${progress.total}（${progress.percent}%）`);
+    if (progress.invalid > 0 || progress.needInfo > 0) {
+      lines.push(`胶液警示：失效节点 ${progress.invalid} 个 · 待补配液节点 ${progress.needInfo} 个，交付结论不得沿用`);
+    }
     lines.push(
       `工序节点：${
         progress.list.length === 0
           ? '无'
-          : progress.list.map((n) => `#${n.seq}${n.stepType}(${n.nodeName}·${n.state === 'done' ? '已完成' : n.state === 'rolledback' ? '已回退' : '待办'})`).join(' → ')
+          : progress.list.map((n) => `#${n.seq}${n.stepType}(${n.nodeName}·${stateText(n)})`).join(' → ')
       }`,
     );
     lines.push(`修复前影像：${before ? `${PHOTO_STAGE_LABEL[before.stage]} · ${before.caption}` : '未选'}`);
@@ -216,18 +228,21 @@ export default function CompareView() {
               </Typography>
             ) : (
               <Stack spacing={0.5}>
-                {progress.list.map((n) => (
-                  <Stack key={n.id} direction="row" spacing={1} alignItems="center">
-                    <Typography variant="body2">
-                      #{n.seq} {n.stepType} · {n.nodeName}
-                    </Typography>
-                    <Chip
-                      size="small"
-                      label={n.state === 'done' ? '已完成' : n.state === 'rolledback' ? '已回退' : '待办'}
-                      color={n.state === 'done' ? 'success' : n.state === 'rolledback' ? 'error' : 'default'}
-                    />
-                  </Stack>
-                ))}
+                {progress.list.map((n) => {
+                  const s = progress.stateOf(n);
+                  return (
+                    <Stack key={n.id} direction="row" spacing={1} alignItems="center">
+                      <Typography variant="body2">
+                        #{n.seq} {n.stepType} · {n.nodeName}
+                      </Typography>
+                      <Chip
+                        size="small"
+                        label={stateText(n)}
+                        color={s === 'done' ? 'success' : s === 'rolledback' || s === 'invalid' ? 'error' : s === 'needInfo' ? 'warning' : 'default'}
+                      />
+                    </Stack>
+                  );
+                })}
               </Stack>
             )}
             <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 1 }}>

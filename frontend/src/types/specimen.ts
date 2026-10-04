@@ -32,6 +32,9 @@ export interface Specimen {
   storageBox: string;
   status: SpecimenStatus;
   createdAt: number;
+  /** 已交付标本因胶液失效被撤下时的撤回原因（重新交付成功后清空） */
+  withdrawReason?: string;
+  withdrawnAt?: number;
 }
 
 export type SpecimenDraft = Omit<Specimen, 'id' | 'createdAt'>;

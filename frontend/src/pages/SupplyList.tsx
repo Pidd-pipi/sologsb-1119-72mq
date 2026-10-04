@@ -2,6 +2,8 @@ import { useMemo, useState } from 'react';
 import Box from '@mui/material/Box';
 import Stack from '@mui/material/Stack';
 import Paper from '@mui/material/Paper';
+import Tabs from '@mui/material/Tabs';
+import Tab from '@mui/material/Tab';
 import Typography from '@mui/material/Typography';
 import TextField from '@mui/material/TextField';
 import MenuItem from '@mui/material/MenuItem';
@@ -19,9 +21,12 @@ import TableBody from '@mui/material/TableBody';
 import TableRow from '@mui/material/TableRow';
 import TableCell from '@mui/material/TableCell';
 import AddIcon from '@mui/icons-material/Add';
+import ScienceIcon from '@mui/icons-material/Science';
+import Inventory2Icon from '@mui/icons-material/Inventory2';
 import { useSupplyStore } from '../stores/supplyStore';
 import { useSpecimenStore } from '../stores/specimenStore';
 import { MeasureField } from '../components/common/MeasureField';
+import { GluePanel } from '../components/glue/GluePanel';
 import { SUPPLY_KINDS, isLowStock, shelfLifeLeftDays, type SupplyKind, type SupplyLot, type SupplyLotDraft } from '../types/supply';
 
 const EMPTY_DRAFT: SupplyLotDraft = {
@@ -36,13 +41,14 @@ const EMPTY_DRAFT: SupplyLotDraft = {
   lowThreshold: 2,
 };
 
-/** /supplies 工具材料台账：按种类分组、批号追溯、低量行高亮 */
+/** /supplies 工具材料台账：按种类分组、批号追溯、低量行高亮；含胶液配制页签 */
 export default function SupplyList() {
   const lots = useSupplyStore((s) => s.items);
   const addLot = useSupplyStore((s) => s.add);
   const issue = useSupplyStore((s) => s.issue);
   const specimens = useSpecimenStore((s) => s.items);
 
+  const [tab, setTab] = useState<'lots' | 'glue'>('lots');
   const [trace, setTrace] = useState('');
   const [kindFilter, setKindFilter] = useState<SupplyKind | 'all'>('all');
   const [createOpen, setCreateOpen] = useState(false);
@@ -111,6 +117,26 @@ export default function SupplyList() {
         <Typography variant="h5" fontWeight={700}>
           工具材料台账
         </Typography>
+        <Box sx={{ flex: 1 }} />
+      </Stack>
+
+      <Paper variant="outlined">
+        <Tabs value={tab} onChange={(_, v) => setTab(v)} variant="fullWidth">
+          <Tab
+            iconPosition="start"
+            icon={<Inventory2Icon fontSize="small" />}
+            value="lots"
+            label={`材料批次（${lots.length}）`}
+          />
+          <Tab iconPosition="start" icon={<ScienceIcon fontSize="small" />} value="glue" label="胶液配制（批号 / 适用期 / 余量）" />
+        </Tabs>
+      </Paper>
+
+      {tab === 'glue' ? (
+        <GluePanel />
+      ) : (
+      <Stack spacing={2}>
+      <Stack direction="row" alignItems="center" spacing={1} flexWrap="wrap">
         <Chip size="small" label={`共 ${lots.length} 个批次`} />
         <Chip size="small" color={lowCount > 0 ? 'warning' : 'default'} label={`低量 ${lowCount} 项`} />
         <Box sx={{ flex: 1 }} />
@@ -385,6 +411,8 @@ export default function SupplyList() {
           </Button>
         </DialogActions>
       </Dialog>
+      </Stack>
+      )}
 
       <Snackbar open={!!toast} autoHideDuration={2400} onClose={() => setToast('')} message={toast} />
     </Stack>

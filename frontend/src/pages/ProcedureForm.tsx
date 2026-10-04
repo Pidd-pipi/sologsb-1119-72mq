@@ -14,10 +14,13 @@ import FormControlLabel from '@mui/material/FormControlLabel';
 import Checkbox from '@mui/material/Checkbox';
 import { useSpecimenStore } from '../stores/specimenStore';
 import { useProcedureStore } from '../stores/procedureStore';
+import { useGlueStore } from '../stores/glueStore';
 import { usePrepProgress } from '../hooks/usePrepProgress';
 import { ProcedureTimeline } from '../components/common/ProcedureTimeline';
 import { MeasureField } from '../components/common/MeasureField';
 import { STEP_FIELD_MAP, STEP_TYPES, type StepType } from '../types/procedure';
+import { isGlueUsable, potLifeLeftMin } from '../types/glue';
+import { GlueIssueError } from '../utils/glueService';
 import { db } from '../utils/db';
 import { newId } from '../utils/id';
 import { makeSketchDataUrl, type PrepPhoto } from '../types/photo';
@@ -30,6 +33,8 @@ export default function ProcedureForm() {
   const addProcedure = useProcedureStore((s) => s.add);
   const finish = useProcedureStore((s) => s.finish);
   const rollback = useProcedureStore((s) => s.rollback);
+  const issueGlue = useGlueStore((s) => s.issue);
+  const glueBatches = useGlueStore((s) => s.items);
 
   const [specimenId, setSpecimenId] = useState(params.get('specimenId') ?? specimens[0]?.id ?? '');
   const [stepType, setStepType] = useState<StepType>('清修');
@@ -38,6 +43,8 @@ export default function ProcedureForm() {
   const [tools, setTools] = useState<string[]>([]);
   const [abrasive, setAbrasive] = useState('');
   const [adhesive, setAdhesive] = useState('');
+  const [glueBatchId, setGlueBatchId] = useState('');
+  const [glueQty, setGlueQty] = useState(5);
   const [adhesiveConc, setAdhesiveConc] = useState(5);
   const [durationMin, setDurationMin] = useState(60);
   const [tempC, setTempC] = useState(22);
@@ -46,12 +53,21 @@ export default function ProcedureForm() {
   const [withPhotos, setWithPhotos] = useState(true);
   const [error, setError] = useState('');
   const [toast, setToast] = useState('');
+  const [submitting, setSubmitting] = useState(false);
 
   const progress = usePrepProgress(specimenId || undefined);
   const fieldMap = STEP_FIELD_MAP[stepType];
   const nextSeq = progress.list.length === 0 ? 1 : Math.max(...progress.list.map((it) => it.seq)) + 1;
 
   const specimen = useMemo(() => specimens.find((it) => it.id === specimenId), [specimens, specimenId]);
+
+  /** 选定胶种后，只允许选择同胶种、未过适用期、有余量的在调批次 */
+  const glueCandidates = useMemo(
+    () => glueBatches.filter((b) => b.adhesive === adhesive && isGlueUsable(b)),
+    [glueBatches, adhesive],
+  );
+  const selectedGlue = glueBatches.find((b) => b.id === glueBatchId);
+  const gluePotLeft = selectedGlue && selectedGlue.status === 'active' ? potLifeLeftMin(selectedGlue) : undefined;
 
   const submit = async () => {
     if (!specimenId) {
@@ -79,31 +95,104 @@ export default function ProcedureForm() {
       setError('胶液浓度需在 0 ~ 100 % 之间');
       return;
     }
+    const usesGlue = fieldMap.adhesives.length > 0 && !!adhesive;
+    let glueSnapshot: { id: string; lotNo: string } | null = null;
+    if (usesGlue) {
+      if (!glueBatchId) {
+        setError('该工序使用胶液，必须选择对应的在调胶液批次（登记批号 / 适用期 / 责任人）');
+        return;
+      }
+      const batch = glueBatches.find((b) => b.id === glueBatchId);
+      if (!batch || !isGlueUsable(batch)) {
+        setError('所选胶液批次已封档或过适用期，请改选');
+        return;
+      }
+      if (!(glueQty > 0)) {
+        setError('胶液领用量必须大于 0');
+        return;
+      }
+      if (glueQty > batch.qty) {
+        setError(`胶液余量不足：当前仅剩 ${batch.qty} ml`);
+        return;
+      }
+      glueSnapshot = { id: batch.id, lotNo: batch.lotNo };
+    }
 
-    const record = await addProcedure({
-      specimenId,
-      stepType,
-      nodeName: nodeName.trim(),
-      seq,
-      tools,
-      abrasive,
-      adhesive: fieldMap.adhesives.length > 0 ? adhesive : '',
-      adhesiveConc: fieldMap.needConc ? adhesiveConc : 0,
-      durationMin,
-      tempC,
-      rh,
-      photoBeforeIds: [],
-      photoAfterIds: [],
-      operator: operator.trim(),
-      startedAt: Date.now(),
-      state: 'pending',
-    });
+    setSubmitting(true);
+    setError('');
+
+    // 先扣胶液余量：跨标签页乐观锁失败时直接返回，表单作为草稿原样保留
+    let glueIssueId: string | undefined;
+    if (usesGlue && glueSnapshot) {
+      try {
+        const result = await issueGlue(glueSnapshot.id, {
+          qty: glueQty,
+          operator: operator.trim(),
+          specimenNo: specimen?.specimenNo ?? '未关联标本',
+          expectedRev: glueBatches.find((b) => b.id === glueSnapshot!.id)?.rev ?? 0,
+        });
+        glueIssueId = result.issue.id;
+        glueSnapshot = { id: result.batch.id, lotNo: result.batch.lotNo };
+      } catch (e) {
+        setSubmitting(false);
+        setError(
+          e instanceof GlueIssueError
+            ? `胶液领用失败：${e.message}`
+            : '胶液领用写入失败，表单内容已保留，请重试',
+        );
+        return;
+      }
+    }
+
+    let recordId = '';
+    try {
+      const record = await addProcedure({
+        specimenId,
+        stepType,
+        nodeName: nodeName.trim(),
+        seq,
+        tools,
+        abrasive,
+        adhesive: usesGlue ? adhesive : '',
+        adhesiveConc: fieldMap.needConc ? adhesiveConc : 0,
+        glueBatchId: glueSnapshot?.id,
+        glueLotNo: glueSnapshot?.lotNo,
+        glueQty: glueSnapshot ? glueQty : undefined,
+        durationMin,
+        tempC,
+        rh,
+        photoBeforeIds: [],
+        photoAfterIds: [],
+        operator: operator.trim(),
+        startedAt: Date.now(),
+        state: 'pending',
+      });
+      recordId = record.id;
+    } catch (e) {
+      // 工序写入失败：回滚已扣的领用（流水标注撤回），保留整张表单草稿
+      if (glueIssueId && glueSnapshot) {
+        const batch = await db.glueBatches.get(glueSnapshot.id);
+        if (batch) {
+          await db.glueBatches.put({
+            ...batch,
+            qty: Number((batch.qty + glueQty).toFixed(3)),
+            rev: batch.rev + 1,
+            issues: batch.issues.map((i) =>
+              i.id === glueIssueId ? { ...i, specimenNo: `${i.specimenNo}（写入失败已退回）` } : i,
+            ),
+          });
+        }
+      }
+      setSubmitting(false);
+      setError('工序写入失败，胶液余量已恢复，表单内容已保留，请重试');
+      return;
+    }
 
     if (withPhotos && specimen) {
       const before: PrepPhoto = {
         id: newId('pho'),
         specimenId,
-        procedureId: record.id,
+        procedureId: recordId,
         stage: 'before',
         caption: `${nodeName.trim()} · 修复前（${specimen.specimenNo}）`,
         dataUrl: makeSketchDataUrl(`修复前 · ${specimen.specimenNo}`, '#6b5844'),
@@ -112,7 +201,7 @@ export default function ProcedureForm() {
       const after: PrepPhoto = {
         id: newId('pho'),
         specimenId,
-        procedureId: record.id,
+        procedureId: recordId,
         stage: 'after',
         caption: `${nodeName.trim()} · 修复后（${specimen.specimenNo}）`,
         dataUrl: makeSketchDataUrl(`修复后 · ${specimen.specimenNo}`, '#3f5a4a'),
@@ -122,10 +211,12 @@ export default function ProcedureForm() {
     }
 
     setError('');
-    setToast(`已追加工序节点 #${seq} ${stepType} · ${record.nodeName}`);
+    setToast(`已追加工序节点 #${seq} ${stepType} · ${nodeName.trim()}`);
     setNodeName('');
     setTools([]);
+    setGlueBatchId('');
     setSeq(nextSeq + 1);
+    setSubmitting(false);
   };
 
   return (
@@ -176,6 +267,7 @@ export default function ProcedureForm() {
                   setTools([]);
                   setAbrasive('');
                   setAdhesive('');
+                  setGlueBatchId('');
                 }}
               >
                 {STEP_TYPES.map((t) => (
@@ -247,34 +339,94 @@ export default function ProcedureForm() {
             ) : null}
 
             {fieldMap.adhesives.length > 0 ? (
-              <Stack direction="row" spacing={1.5}>
-                <TextField
-                  select
-                  size="small"
-                  fullWidth
-                  label="胶种"
-                  value={adhesive}
-                  onChange={(e) => setAdhesive(e.target.value)}
-                >
-                  <MenuItem value="">未选定</MenuItem>
-                  {fieldMap.adhesives.map((a) => (
-                    <MenuItem key={a} value={a}>
-                      {a}
-                    </MenuItem>
-                  ))}
-                </TextField>
-                {fieldMap.needConc ? (
-                  <Box sx={{ flex: 1 }}>
-                    <MeasureField
-                      label="胶液浓度"
-                      unit="%"
-                      min={0}
-                      max={100}
-                      step={0.5}
-                      value={adhesiveConc}
-                      onChange={setAdhesiveConc}
-                    />
-                  </Box>
+              <Stack spacing={1.5}>
+                <Stack direction="row" spacing={1.5}>
+                  <TextField
+                    select
+                    size="small"
+                    fullWidth
+                    label="胶种"
+                    value={adhesive}
+                    onChange={(e) => {
+                      setAdhesive(e.target.value);
+                      setGlueBatchId('');
+                    }}
+                  >
+                    <MenuItem value="">未选定</MenuItem>
+                    {fieldMap.adhesives.map((a) => (
+                      <MenuItem key={a} value={a}>
+                        {a}
+                      </MenuItem>
+                    ))}
+                  </TextField>
+                  {fieldMap.needConc ? (
+                    <Box sx={{ flex: 1 }}>
+                      <MeasureField
+                        label="胶液浓度"
+                        unit="%"
+                        min={0}
+                        max={100}
+                        step={0.5}
+                        value={adhesiveConc}
+                        onChange={setAdhesiveConc}
+                      />
+                    </Box>
+                  ) : null}
+                </Stack>
+                {adhesive ? (
+                  <Paper variant="outlined" sx={{ p: 1.5, bgcolor: 'grey.50' }}>
+                    <Stack spacing={1.5}>
+                      <Stack direction="row" spacing={1.5}>
+                        <TextField
+                          select
+                          size="small"
+                          fullWidth
+                          required
+                          label="所用胶液批次（在调）"
+                          value={glueBatchId}
+                          onChange={(e) => setGlueBatchId(e.target.value)}
+                          helperText={
+                            glueCandidates.length === 0
+                              ? '没有同胶种的可调批次（未过适用期且有余量），请先到「材料台账 · 胶液配制」配液'
+                              : '只能选未到适用期、余量充足的批次；选过期批次会被拦下'
+                          }
+                        >
+                          {glueCandidates.map((b) => {
+                            const left = potLifeLeftMin(b);
+                            return (
+                              <MenuItem key={b.id} value={b.id}>
+                                {b.lotNo} · {b.concentration}% · 余 {b.qty} ml · 适用期剩{' '}
+                                {left >= 60 ? `${Math.floor(left / 60)} h` : `${left} min`} · {b.owner}
+                              </MenuItem>
+                            );
+                          })}
+                        </TextField>
+                        <Box sx={{ width: 200 }}>
+                          <MeasureField
+                            label="胶液领用量"
+                            unit="ml"
+                            min={0.1}
+                            max={selectedGlue?.qty ?? 100000}
+                            step={0.5}
+                            value={glueQty}
+                            onChange={setGlueQty}
+                          />
+                        </Box>
+                      </Stack>
+                      {selectedGlue ? (
+                        <Stack direction="row" spacing={1} flexWrap="wrap">
+                          <Chip size="small" label={`批号 ${selectedGlue.lotNo}`} />
+                          <Chip size="small" color="info" variant="outlined" label={`余量 ${selectedGlue.qty} ml`} />
+                          <Chip
+                            size="small"
+                            color={gluePotLeft !== undefined && gluePotLeft < 60 ? 'error' : 'default'}
+                            label={gluePotLeft !== undefined ? `适用期剩 ${gluePotLeft} 分钟` : '已封档'}
+                          />
+                          <Chip size="small" label={`责任人 ${selectedGlue.owner}`} />
+                        </Stack>
+                      ) : null}
+                    </Stack>
+                  </Paper>
                 ) : null}
               </Stack>
             ) : null}
@@ -313,8 +465,8 @@ export default function ProcedureForm() {
             />
 
             <Stack direction="row" spacing={1}>
-              <Button variant="contained" onClick={submit}>
-                保存节点
+              <Button variant="contained" onClick={submit} disabled={submitting}>
+                {submitting ? '写入中…' : '保存节点'}
               </Button>
               <Button onClick={() => navigate('/procedures/new')}>清空重填</Button>
             </Stack>
@@ -333,6 +485,8 @@ export default function ProcedureForm() {
           ) : null}
           <ProcedureTimeline
             items={progress.list}
+            deriveState={progress.stateOf}
+            glueMap={progress.glueMap}
             onFinish={async (pid) => {
               await finish(pid);
               setToast('节点已完成');

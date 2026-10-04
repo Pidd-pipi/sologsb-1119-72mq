@@ -13,7 +13,9 @@ import Chip from '@mui/material/Chip';
 import { useSpecimenStore } from '../stores/specimenStore';
 import { useProcedureStore } from '../stores/procedureStore';
 import { useSupplyStore } from '../stores/supplyStore';
+import { useGlueStore } from '../stores/glueStore';
 import { ensureSeedData, markDbVersion, readDbVersion } from '../utils/db';
+import { onDataChange } from '../utils/bus';
 import SpecimenList from '../pages/SpecimenList';
 import SpecimenDetail from '../pages/SpecimenDetail';
 import ProcedureForm from '../pages/ProcedureForm';
@@ -80,19 +82,44 @@ export default function AppRouter() {
   const loadSpecimens = useSpecimenStore((s) => s.load);
   const loadProcedures = useProcedureStore((s) => s.load);
   const loadSupplies = useSupplyStore((s) => s.load);
+  const loadGlue = useGlueStore((s) => s.load);
+  const sweepGlue = useGlueStore((s) => s.sweep);
 
   useEffect(() => {
     let alive = true;
     (async () => {
       await ensureSeedData();
       await markDbVersion();
-      await Promise.all([loadSpecimens(), loadProcedures(), loadSupplies()]);
+      // 启动先巡检：示范 / 历史数据里到适用期的批次立即封档、撤销工序、撤回标本
+      await sweepGlue();
+      await Promise.all([loadSpecimens(), loadProcedures(), loadSupplies(), loadGlue()]);
       if (alive) setReady(true);
     })();
     return () => {
       alive = false;
     };
-  }, [loadSpecimens, loadProcedures, loadSupplies]);
+  }, [loadSpecimens, loadProcedures, loadSupplies, loadGlue, sweepGlue]);
+
+  // 每 30 秒巡检适用期 / 余量；页面重新获得焦点时立刻巡检
+  useEffect(() => {
+    if (!ready) return;
+    const timer = window.setInterval(() => {
+      void sweepGlue();
+    }, 30000);
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') void sweepGlue();
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    // 其它标签页领用 / 封档后，本标签页重新装载本地数据
+    const offBus = onDataChange(() => {
+      void Promise.all([loadSpecimens(), loadProcedures(), loadSupplies(), loadGlue()]);
+    });
+    return () => {
+      window.clearInterval(timer);
+      document.removeEventListener('visibilitychange', onVisible);
+      offBus();
+    };
+  }, [ready, sweepGlue, loadSpecimens, loadProcedures, loadSupplies, loadGlue]);
 
   if (!ready) {
     return (
